@@ -7,14 +7,16 @@ import threading
 from queue import Queue
 import time
 from faster_whisper import WhisperModel
-import asyncio
+import sys
+import os
+
 
 model_size = "tiny.en"
 form_1 = pyaudio.paInt16 # 16-bit resolution
 chans = 1
 samp_rate = 16000
-chunk = 1024 # 2^12 samples for buffer
-record_secs = 3 # seconds to record
+chunk = 2048 # 2^12 samples for buffer
+buffer_size = 1
 dev_index = 1 # device index found by p.get_device_info_by_index(ii)
 
 
@@ -28,11 +30,12 @@ print('done loading')
 def record_audio(stream, queue):
     # loop through stream and append audio chunks to frame array
 
-    for i in range(20):
+    while True:
         frames = []
-        for ii in range(0, int((samp_rate / chunk) * record_secs)):
+        for ii in range(0, int((samp_rate / chunk) * buffer_size)):
             data = stream.read(chunk)
             frames.append(data)
+
         queue.put(b''.join(frames))
 
 
@@ -41,9 +44,13 @@ def transcribe_frame(model, frame):
         frame, beam_size=2, language="en", condition_on_previous_text=True
     )
     # import pdb;pdb.set_trace()
+
+    text = ''
     for segment in segments:
-        print(segment.text, end=" ", flush=True)
-        text = True
+        # print(segment.text, end=" ", flush=True)
+        text = text + ' ' + segment.text
+
+    return text
 
 
 def create_in_memory_wav(audio, audio_frame):
@@ -57,64 +64,50 @@ def create_in_memory_wav(audio, audio_frame):
     wav_io.seek(0)
     return wav_io
 
-def second_pass_thread(model, audio, audio_frames, window_size):
-    while True:
-        if len(audio_frames) >= window_size:
-            frames_to_process = b''.join(audio_frames[:window_size])
-            audio_frames = audio_frames[window_size:]
-
-            wav_io = create_in_memory_wav(audio, frames_to_process)
-
-            segments, info = model.transcribe(
-                wav_io, beam_size=2, language="en", condition_on_previous_text=True
-            )
-
-            for segment in segments:
-                print(f"\nSecond Pass: {segment.text}", flush=True)
-
-            time.sleep(0.1)  # Add a small delay to avoid excessive CPU usage
-
-        time.sleep(0.1)  # Add a small delay to avoid excessive CPU usage
-
-def worker(queue, audio, audio_frames):
+def worker(queue, audio, audio_frames, transcript):
     counter = 0
     while True:
-
-        # if counter == 4:
-        #     import pdb; pdb.set_trace()
-        # counter +=1
 
         frame = queue.get()
         if frame is None:
             break
 
-        wav_io = create_in_memory_wav(audio, frame)
-        transcribe_frame(model, wav_io)
-
         audio_frames.append(frame)
+        wav_io = create_in_memory_wav(audio, b''.join(audio_frames))
+        text = transcribe_frame(model, wav_io)
+        if len(audio_frames)>2:
+
+            transcript.append(text)
+            audio_frames = []
+            os.system('clear')
+            print(''.join(transcript), end='', flush = True)
+
+        else:
+            os.system('clear')
+            print(''.join(transcript + [text]), end='', flush = True)
 
         queue.task_done()
-        time.sleep(0.1)  # Add a small delay to avoid excessive CPU usage
+        time.sleep(0.01)
+
 
 
 
 def button_pressed_callback(channel):
-    print("Button pressed!")
 
     audio = pyaudio.PyAudio()
     stream = audio.open(format=form_1, rate=samp_rate, channels=chans,
                         input_device_index=dev_index, input=True,
                         frames_per_buffer=chunk)
+    os.system('clear')
 
     frame_queue = Queue()
     audio_frames = []
+    transcript = []
 
     num_workers = 1
     for _ in range(num_workers):
-        threading.Thread(target=worker, args=(frame_queue, audio, audio_frames), daemon=True).start()
+        threading.Thread(target=worker, args=(frame_queue, audio, audio_frames, transcript), daemon=True).start()
 
-    second_pass_thread_handle = threading.Thread(target=second_pass_thread, args=(model, audio, audio_frames, 3), daemon=True)
-    second_pass_thread_handle.start()
 
     print("Recording and transcribing...")
     record_audio(stream, frame_queue)
